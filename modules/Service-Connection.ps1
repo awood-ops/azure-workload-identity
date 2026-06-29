@@ -1,249 +1,144 @@
 <#
-    .SYNOPSIS
-        Creates a new azure resource manager service connection in an Azure DevOps project.
+.SYNOPSIS
+    Creates and retrieves Azure DevOps service connections via the REST API.
 #>
+
 function New-AzDevOpsAzureSubscriptionServiceConnection {
-  param (
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $OrgName,
+    <#
+    .SYNOPSIS
+        Creates an Azure Resource Manager service connection scoped to a subscription.
+    #>
+    param (
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $OrgName,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ProjectName,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Name,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $SubscriptionId,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $SubscriptionName,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ServicePrincipalClientId,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ServicePrincipalTenantId,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $AccessToken
+    )
 
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $ProjectName,
+    Write-Host "Creating service connection '$Name' in project '$ProjectName'..." -ForegroundColor Cyan
 
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $Name,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $SubscriptionId,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $SubscriptionName,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $ServicePrincipalTenantId,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $AccessToken,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $ServicePrincipalClientId
-
-    
-  )
-
-  Write-Host "Creating service connection $Name in project $ProjectName" -ForegroundColor Cyan;
-
-  # First, we need to get the project Id to go in our project reference
-  $projectUrl = "https://dev.azure.com/$OrgName/_apis/projects/$ProjectName" + "?api-version=7.2-preview.4";
-
-  $url = "https://dev.azure.com/$OrgName/_apis/serviceendpoint/endpoints?api-version=7.2-preview.4";
-
-  $headers = @{
-      'Authorization' = 'Bearer ' + $AccessToken
-      'Content-Type' = 'application/json'
-  }
-
-  try {
-    $project = Invoke-RestMethod -Method Get -Uri $projectUrl -Headers $headers
-    Write-Host "Successfully retrieved project information."
-    } catch {
-    Write-Error "Failed to retrieve project information: $_"
-    return
+    $headers = @{
+        Authorization  = "Bearer $AccessToken"
+        'Content-Type' = 'application/json'
     }
 
-  $projectId = $project.id;
+    $project = Invoke-RestMethod -Method Get -Headers $headers `
+        -Uri "https://dev.azure.com/$OrgName/_apis/projects/$([Uri]::EscapeDataString($ProjectName))?api-version=7.2-preview.4"
 
-  $body = @"
-  {
-      "data": {
-        "subscriptionId": "$SubscriptionId",
-        "subscriptionName": "$SubscriptionName",
-        "environment": "AzureCloud",
-        "scopeLevel": "Subscription",
-        "creationMode": "Manual"
-      },
-      "name": "$Name",
-      "type": "AzureRM",
-      "url": "https://management.azure.com/",
-      "authorization": {
-        "parameters": {
-          "tenantid": "$ServicePrincipalTenantId",
-          "serviceprincipalid": "$ServicePrincipalClientId"
-        },
-        "scheme": "WorkloadIdentityFederation"
-      },
-      "isShared": false,
-      "isReady": true,
-      "serviceEndpointProjectReferences": [
-        {
-          "projectReference": {
-            "name": "$ProjectName",
-            "id": "$projectId"
-          },
-          "name": "$Name"
+    $body = @{
+        data = @{
+            subscriptionId   = $SubscriptionId
+            subscriptionName = $SubscriptionName
+            environment      = 'AzureCloud'
+            scopeLevel       = 'Subscription'
+            creationMode     = 'Manual'
         }
-      ]
-    }
-"@;
+        name          = $Name
+        type          = 'AzureRM'
+        url           = 'https://management.azure.com/'
+        authorization = @{
+            parameters = @{
+                tenantid             = $ServicePrincipalTenantId
+                serviceprincipalid   = $ServicePrincipalClientId
+            }
+            scheme = 'WorkloadIdentityFederation'
+        }
+        isShared  = $false
+        isReady   = $true
+        serviceEndpointProjectReferences = @(@{
+            projectReference = @{ name = $ProjectName; id = $project.id }
+            name             = $Name
+        })
+    } | ConvertTo-Json -Depth 10
 
-  $serviceConnection = Invoke-RestMethod -Method Post -Uri $url -Headers $headers -Body $body;
+    $result = Invoke-RestMethod -Method Post -Headers $headers -Body $body `
+        -Uri "https://dev.azure.com/$OrgName/_apis/serviceendpoint/endpoints?api-version=7.2-preview.4"
 
-  Write-Host "Successfully created service connection $Name in project $ProjectName" -ForegroundColor Green;
-
-  return $serviceConnection;
-
-  ##Output the Issuer and Subject Identifier
-  $serviceConnection | Select-Object -Property @{Name="ServiceConnectionName";Expression={$_.name}}, @{Name="ServiceConnectionId";Expression={$_.id}}
+    Write-Host "  Service connection '$Name' created." -ForegroundColor Green
+    return $result
 }
 
 function New-AzDevOpsAzureManagementGroupServiceConnection {
-  param (
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $OrgName,
+    <#
+    .SYNOPSIS
+        Creates an Azure Resource Manager service connection scoped to a management group.
+    #>
+    param (
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $OrgName,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ProjectName,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Name,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ManagementGroupId,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ManagementGroupName,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ServicePrincipalClientId,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ServicePrincipalTenantId,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $AccessToken
+    )
 
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $ProjectName,
+    Write-Host "Creating management group service connection '$Name' in project '$ProjectName'..." -ForegroundColor Cyan
 
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $Name,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $ManagementGroupId,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $ManagementGroupName,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $ServicePrincipalTenantId,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $AccessToken,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $ServicePrincipalClientId
-
-    
-  )
-
-  Write-Host "Creating service connection $Name in project $ProjectName" -ForegroundColor Cyan;
-
-  # First, we need to get the project Id to go in our project reference
-  $projectUrl = "https://dev.azure.com/$OrgName/_apis/projects/$ProjectName" + "?api-version=7.2-preview.4";
-
-  $url = "https://dev.azure.com/$OrgName/_apis/serviceendpoint/endpoints?api-version=7.2-preview.4";
-
-  $headers = @{
-      'Authorization' = 'Bearer ' + $AccessToken
-      'Content-Type' = 'application/json'
-  }
-
-  $project = Invoke-RestMethod -Method Get -Uri $projectUrl -Headers $headers;
-
-  $projectId = $project.id;
-
-  $body = @"
-  {
-      "data": {
-        "managementGroupId": "$ManagementGroupId",
-        "managementGroupName": "$ManagementGroupName",
-        "environment": "AzureCloud",
-        "scopeLevel": "ManagementGroup",
-        "creationMode": "Manual"
-      },
-      "name": "$Name",
-      "type": "AzureRM",
-      "url": "https://management.azure.com/",
-      "authorization": {
-        "parameters": {
-          "tenantid": "$ServicePrincipalTenantId",
-          "serviceprincipalid": "$ServicePrincipalClientId"
-        },
-        "scheme": "WorkloadIdentityFederation"
-      },
-      "isShared": false,
-      "isReady": true,
-      "serviceEndpointProjectReferences": [
-        {
-          "projectReference": {
-            "name": "$ProjectName",
-            "id": "$projectId"
-          },
-          "name": "$Name"
-        }
-      ]
+    $headers = @{
+        Authorization  = "Bearer $AccessToken"
+        'Content-Type' = 'application/json'
     }
-"@;
 
-  $serviceConnection = Invoke-RestMethod -Method Post -Uri $url -Headers $headers -Body $body;
+    $project = Invoke-RestMethod -Method Get -Headers $headers `
+        -Uri "https://dev.azure.com/$OrgName/_apis/projects/$([Uri]::EscapeDataString($ProjectName))?api-version=7.2-preview.4"
 
-  Write-Host "Successfully created service connection $Name in project $ProjectName" -ForegroundColor Green;
+    $body = @{
+        data = @{
+            managementGroupId   = $ManagementGroupId
+            managementGroupName = $ManagementGroupName
+            environment         = 'AzureCloud'
+            scopeLevel          = 'ManagementGroup'
+            creationMode        = 'Manual'
+        }
+        name          = $Name
+        type          = 'AzureRM'
+        url           = 'https://management.azure.com/'
+        authorization = @{
+            parameters = @{
+                tenantid           = $ServicePrincipalTenantId
+                serviceprincipalid = $ServicePrincipalClientId
+            }
+            scheme = 'WorkloadIdentityFederation'
+        }
+        isShared  = $false
+        isReady   = $true
+        serviceEndpointProjectReferences = @(@{
+            projectReference = @{ name = $ProjectName; id = $project.id }
+            name             = $Name
+        })
+    } | ConvertTo-Json -Depth 10
 
-  return $serviceConnection;
+    $result = Invoke-RestMethod -Method Post -Headers $headers -Body $body `
+        -Uri "https://dev.azure.com/$OrgName/_apis/serviceendpoint/endpoints?api-version=7.2-preview.4"
 
-  ##Output the Issuer and Subject Identifier
-  $serviceConnection | Select-Object -Property @{Name="ServiceConnectionName";Expression={$_.name}}, @{Name="ServiceConnectionId";Expression={$_.id}}
+    Write-Host "  Service connection '$Name' created." -ForegroundColor Green
+    return $result
 }
 
-<#
-    .SYNOPSIS
-        Gets a azure resource manager service connection in an Azure DevOps project.
-#>
 function Get-AzDevOpsAzureServiceConnection {
-  param (
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $OrgName,
+    <#
+    .SYNOPSIS
+        Retrieves an Azure DevOps service connection by ID.
+    #>
+    param (
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $OrgName,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ProjectName,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $ServiceConnectionId,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $Name,
+        [Parameter(Mandatory)] [ValidateNotNullOrEmpty()] [string] $AccessToken
+    )
 
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $ProjectName,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $ServiceConnectionId,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $AccessToken,
-
-      [Parameter(Mandatory=$true)]
-      [ValidateNotNullOrEmpty()]
-      [string] $Name
-  )
-
-  Write-Host "Getting service connection $Name in project $ProjectName" -ForegroundColor Cyan;
-
-  $url = "https://dev.azure.com/$OrgName/$ProjectName/_apis/serviceendpoint/endpoints/$ServiceConnectionId"+ "?api-version=7.2-preview.4";
-
-  $headers = @{
-      'Authorization' = 'Bearer ' + $AccessToken
-      'Content-Type' = 'application/json'
-  }
-
-  try {
-    $serviceConnection = Invoke-RestMethod -Method Get -Uri $url -Headers $headers
-    Write-Host "Successfully retrieved service connection information."
-    } catch {
-    Write-Error "Failed to retrieve service connection information: $_"
-    return
+    $headers = @{
+        Authorization  = "Bearer $AccessToken"
+        'Content-Type' = 'application/json'
     }
 
-
-  return $serviceConnection
+    return Invoke-RestMethod -Method Get -Headers $headers `
+        -Uri "https://dev.azure.com/$OrgName/$([Uri]::EscapeDataString($ProjectName))/_apis/serviceendpoint/endpoints/$ServiceConnectionId`?api-version=7.2-preview.4"
 }
