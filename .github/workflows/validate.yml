@@ -1,0 +1,35 @@
+name: Validate Workload Identity
+
+on:
+  workflow_dispatch:
+    inputs:
+      params_file:
+        description: Path to params JSON file
+        default: config/example.json
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Az modules
+        shell: pwsh
+        run: Install-Module Az.Accounts, Az.Resources -Force -Scope CurrentUser -Repository PSGallery
+
+      - name: Run validation
+        shell: pwsh
+        env:
+          AZURE_DEVOPS_EXT_PAT: ${{ secrets.AZURE_DEVOPS_PAT }}
+        run: .\Test-WorkloadIdentity.ps1 -ParamsFile '${{ inputs.params_file }}'
