@@ -7,21 +7,24 @@
     Reads a JSON parameters file and for each subscription entry:
       1. Creates (or reuses) an Entra ID app registration and service principal
       2. Removes any client secret (workload identity uses federation, not secrets)
-      3. Assigns the Owner role on the subscription
-      4. Adds the Directory.Read.All API permission and grants admin consent
+      3. Assigns the specified role on the subscription (default: Contributor)
+      4. Optionally adds Microsoft Graph API permissions and grants admin consent
       5. Optionally creates an Azure DevOps service connection and wires the federated credential
 
     Idempotent — skips steps where the resource already exists.
 
+    Follows the principle of least privilege: Contributor is the default role and no API
+    permissions are added unless explicitly listed in the params file.
+
 .PARAMETER ParamsFile
     Path to the JSON parameters file. Defaults to 'config/example.json'.
-    See config/example.json for the required schema.
+    See config/example.json for the full schema.
 
 .EXAMPLE
-    .\New-WorkloadIdentity.ps1 -ParamsFile 'config/my-params.json'
+    .\New-WorkloadIdentity.ps1 -ParamsFile 'config\my-params.json'
 
 .EXAMPLE
-    .\New-WorkloadIdentity.ps1 -Verbose
+    .\New-WorkloadIdentity.ps1 -ParamsFile 'config\my-params.json' -Verbose
 #>
 [CmdletBinding()]
 param (
@@ -33,12 +36,10 @@ param (
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Verify Az context
 if (-not (Get-AzContext)) {
     throw 'No Azure context found. Run Connect-AzAccount before invoking this script.'
 }
 
-# Dot-source modules relative to the script location
 $moduleRoot = Join-Path $PSScriptRoot 'modules'
 . (Join-Path $moduleRoot 'Authentication.ps1')
 . (Join-Path $moduleRoot 'Service-Connection.ps1')
@@ -49,12 +50,15 @@ $params = Get-Content $ParamsFile -Raw | ConvertFrom-Json
 foreach ($param in $params) {
     $subscriptionName = $param.SubscriptionName
     $createServiceConnection = [System.Convert]::ToBoolean($param.CreateServiceConnection)
-    $orgName = $param.OrgName
-    $projectName = $param.ProjectName
+    $orgName    = $param.PSObject.Properties['OrgName']     ? $param.OrgName     : $null
+    $projectName = $param.PSObject.Properties['ProjectName'] ? $param.ProjectName : $null
 
-    Write-Host "`n=== Processing: $subscriptionName ===" -ForegroundColor Cyan
+    # PoLP defaults — explicitly override in params when broader access is required
+    $role   = $param.PSObject.Properties['Role']                  ? $param.Role                  : 'Contributor'
+    $apiPermissions = $param.PSObject.Properties['ApiPermissions'] ? $param.ApiPermissions        : @()
+    $spName = $param.PSObject.Properties['ServicePrincipalName']  ? $param.ServicePrincipalName  : "app-$subscriptionName-devops"
 
-    $spName = "app-$subscriptionName-devops"
+    Write-Host "`n=== Processing: $subscriptionName (role: $role) ===" -ForegroundColor Cyan
 
     # Resolve subscription
     $subscriptionId = (Get-AzSubscription -SubscriptionName $subscriptionName -ErrorAction SilentlyContinue).Id
@@ -77,7 +81,7 @@ foreach ($param in $params) {
         Write-Host "  Created service principal '$spName'." -ForegroundColor Green
     }
 
-    # Remove client secret (workload identity uses federation only)
+    # Remove client secret — workload identity uses federation only
     try {
         Get-AzADApplication -DisplayName $spName | Remove-AzADAppCredential -ErrorAction SilentlyContinue
         Write-Verbose "Client secret removed (if any existed)."
@@ -85,48 +89,52 @@ foreach ($param in $params) {
         Write-Warning "Could not remove client secret from '$spName': $_"
     }
 
-    # Assign Owner role on the subscription
-    $existingRole = Get-AzRoleAssignment -ObjectId $sp.Id -RoleDefinitionName 'Owner' `
+    # Assign role on the subscription
+    $existingRole = Get-AzRoleAssignment -ObjectId $sp.Id -RoleDefinitionName $role `
         -Scope "/subscriptions/$subscriptionId" -ErrorAction SilentlyContinue
     if ($existingRole) {
-        Write-Verbose "Owner role already assigned — skipping."
+        Write-Verbose "'$role' role already assigned — skipping."
     } else {
-        Write-Verbose "Assigning Owner role..."
-        New-AzRoleAssignment -ObjectId $sp.Id -RoleDefinitionName 'Owner' `
+        Write-Verbose "Assigning '$role' role..."
+        New-AzRoleAssignment -ObjectId $sp.Id -RoleDefinitionName $role `
             -Scope "/subscriptions/$subscriptionId" | Out-Null
-        Write-Host "  Assigned Owner role on '$subscriptionName'." -ForegroundColor Green
+        Write-Host "  Assigned '$role' role on '$subscriptionName'." -ForegroundColor Green
     }
 
-    # Add Directory.Read.All API permission
-    $spnApp   = Get-AzADApplication -DisplayName $spName
-    $graphApiId    = '00000003-0000-0000-c000-000000000000'
-    $directoryRead = '7ab1d382-f21e-4acd-a863-ba3e13f7da61'
+    # Add API permissions (only what is explicitly listed — none by default)
+    $spnApp = Get-AzADApplication -DisplayName $spName
 
-    $existing = Get-AzADAppPermission -ApplicationId $spnApp.AppId |
-        Where-Object { $_.ApiId -eq $graphApiId -and $_.Id -eq $directoryRead }
+    if ($apiPermissions.Count -gt 0) {
+        $existingPermissions = Get-AzADAppPermission -ApplicationId $spnApp.AppId
 
-    if ($existing) {
-        Write-Verbose "Directory.Read.All permission already exists — skipping."
+        foreach ($perm in $apiPermissions) {
+            $alreadyExists = $existingPermissions | Where-Object {
+                $_.ApiId -eq $perm.ApiId -and $_.Id -eq $perm.PermissionId -and $_.Type -eq $perm.Type
+            }
+            if ($alreadyExists) {
+                Write-Verbose "Permission '$($perm.Name)' already exists — skipping."
+            } else {
+                Write-Verbose "Adding permission '$($perm.Name)'..."
+                Add-AzADAppPermission -ApplicationId $spnApp.AppId `
+                    -ApiId $perm.ApiId -PermissionId $perm.PermissionId -Type $perm.Type
+                Write-Host "  Added permission '$($perm.Name)'." -ForegroundColor Green
+            }
+        }
+
+        # Grant admin consent only when permissions were specified
+        Start-Sleep -Seconds 10
+        Write-Verbose "Granting admin consent..."
+        $null = az ad app permission admin-consent --id $spnApp.AppId 2>&1
+        Write-Host "  Admin consent granted." -ForegroundColor Green
     } else {
-        Write-Verbose "Adding Directory.Read.All permission..."
-        Add-AzADAppPermission -ApplicationId $spnApp.AppId -ApiId $graphApiId `
-            -PermissionId $directoryRead -Type 'Role'
-        Write-Host "  Added Directory.Read.All permission." -ForegroundColor Green
+        Write-Verbose "No ApiPermissions specified — skipping Graph permissions and admin consent."
     }
 
-    # Grant admin consent via Azure CLI
-    # Brief pause to allow the permission to propagate before consent
-    Start-Sleep -Seconds 10
-    Write-Verbose "Granting admin consent..."
-    $null = az ad app permission admin-consent --id $spnApp.AppId 2>&1
-    Write-Host "  Admin consent granted." -ForegroundColor Green
-
-    # Summary output
     Write-Host "  App ID        : $($sp.AppId)"
     Write-Host "  Tenant ID     : $($sp.AppOwnerOrganizationId)"
     Write-Host "  Subscription  : $subscriptionName ($subscriptionId)"
+    Write-Host "  Role          : $role"
 
-    # Optionally create the ADO service connection
     if (-not $createServiceConnection) {
         Write-Verbose "CreateServiceConnection=false — skipping ADO service connection."
         continue
@@ -147,11 +155,11 @@ foreach ($param in $params) {
         -AccessToken              $token
 
     $issuer = (Get-AzDevOpsAzureServiceConnection `
-        -OrgName            $orgName `
-        -ProjectName        $projectName `
-        -Name               $connectionName `
+        -OrgName             $orgName `
+        -ProjectName         $projectName `
+        -Name                $connectionName `
         -ServiceConnectionId $sc.id `
-        -AccessToken        $token).authorization.parameters.workloadIdentityFederationIssuer
+        -AccessToken         $token).authorization.parameters.workloadIdentityFederationIssuer
 
     $appObjectId = (Get-AzADApplication -DisplayName $spName).Id
     $subject     = "sc://$orgName/$projectName/$connectionName"

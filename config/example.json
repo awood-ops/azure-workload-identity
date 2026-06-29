@@ -1,14 +1,20 @@
 [
     {
-        "SubscriptionName": "sub-p-xxx-01",
+        "SubscriptionName": "sub-prod-myapp-01",
+        "ServicePrincipalName": "app-myapp-devops",
+        "Role": "Contributor",
+        "ApiPermissions": [],
         "CreateServiceConnection": "true",
-        "OrgName": "xxxxx",
-        "ProjectName": "xxxxx"
+        "OrgName": "my-ado-org",
+        "ProjectName": "My Project"
     },
     {
-        "SubscriptionName": "sub-p-xxx-02",
+        "SubscriptionName": "sub-prod-myapp-02",
+        "ServicePrincipalName": "app-myapp-devops",
+        "Role": "Contributor",
+        "ApiPermissions": [],
         "CreateServiceConnection": "true",
-        "OrgName": "xxxxxxxx",
-        "ProjectName": "xxxxx"
+        "OrgName": "my-ado-org",
+        "ProjectName": "My Project"
     }
 ]
